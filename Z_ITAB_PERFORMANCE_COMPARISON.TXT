@@ -1,0 +1,565 @@
+*/**
+* Author: Ben Meijs  Ctac NL
+* Date  : 15-12-2016
+* Comparing performance of internal tables, being processes in a nested way.
+* - LOOP within LOOP: three options (standard, sorted and parallel cursor/tabix).
+* - READ within LOOP: four options (standard, binary search, sorted table, hashed table)
+*
+* Also displaying comparative performance loss when using standard/sorted/hashed tables.
+*/
+
+REPORT zz_itab_performance_comparison.
+
+TYPES: BEGIN OF ty_st_itab,
+        key1 TYPE n LENGTH 5,
+        fld1 TYPE c LENGTH 10,
+       END   OF ty_st_itab,
+       ty_ta_itab1 TYPE STANDARD TABLE OF ty_st_itab,
+       ty_ts_itab1 TYPE SORTED TABLE OF ty_st_itab WITH NON-UNIQUE KEY key1,
+       ty_th_itab1 TYPE HASHED TABLE OF ty_st_itab WITH UNIQUE KEY key1.
+
+TYPES: BEGIN OF ty_st_rows,
+         cnt TYPE i,
+       END   OF ty_st_rows.
+
+DATA: ta_rows TYPE STANDARD TABLE OF ty_st_rows WITH DEFAULT KEY,
+      wa_rows TYPE ty_st_rows,
+      tp_rows TYPE i.
+
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_loopt AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtloopt.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_loops AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtloops.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_loopp AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtloopp.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_readt AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtreadt.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_readb AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtreadb.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_reads AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtreads.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+PARAMETERS: cb_readh AS CHECKBOX.
+SELECTION-SCREEN COMMENT 5(50) txtreadh.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+
+SELECTION-SCREEN COMMENT 1(50) txtrows.
+PARAMETERS: pa_rows  TYPE i DEFAULT 1000.
+SELECTION-SCREEN END OF LINE.
+
+
+INITIALIZATION.
+
+  txtrows =  'max rows outertable (inner*10)'.
+  txtloopt = 'LOOP-LOOP: Inner table STANDARD (sequential)'.
+  txtloops = 'LOOP-LOOP: Inner table SORTED (binary)'.
+  txtloopp = 'LOOP-LOOP: Inner table STANDARD, Parallel tabix'.
+  txtreadb = 'LOOP-READ BINARY SEARCH inner table'.
+  txtreadh = 'LOOP-READ HASHED TABLE'.
+  txtreads = 'LOOP-READ SORTED TABLE'.
+  txtreadt = 'LOOP-READ STANDARD TABLE'.
+
+START-OF-SELECTION.
+
+  tp_rows = pa_rows.
+  WHILE tp_rows GE 2.
+    wa_rows-cnt = tp_rows.
+    INSERT wa_rows INTO ta_rows INDEX 1.
+    tp_rows = tp_rows / 2.
+  ENDWHILE.
+
+  IF  cb_loopt = abap_true. " standard table
+    PERFORM do_loopt.
+  ENDIF.
+  IF  cb_loops = abap_true. " sorted table as innner table
+    PERFORM do_loops.
+  ENDIF.
+  IF  cb_loopp = abap_true. " Two standard tables, with use of SKM
+    PERFORM do_loopp.
+  ENDIF.
+  IF cb_readt = abap_true.
+    PERFORM do_readt.
+  ENDIF.
+  IF cb_readb = abap_true.
+    PERFORM do_readb.
+  ENDIF.
+  IF cb_reads = abap_true.
+    PERFORM do_reads.
+  ENDIF.
+  IF cb_readh = abap_true.
+    PERFORM do_readh.
+  ENDIF.
+*&---------------------------------------------------------------------*
+*&      Form  DO_LOOPT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_loopt .
+* Inner table is standard table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ta_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'LOOP in LOOP: Outer and Inner table are STANDARD'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_standard USING wa_rows-cnt CHANGING lta_itab1.
+    PERFORM populate_inner_standard USING wa_rows-cnt CHANGING lta_itab2.
+
+    tp_linesi = lines( lta_itab1 ).
+    tp_lineso = lines( lta_itab2 ).
+    WRITE: / 'Outer Table', tp_linesi, 'Inner Table', tp_lineso.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab1 INTO lwa_itab1.
+      LOOP AT lta_itab2 INTO lwa_itab2 WHERE key1 = lwa_itab1-key1.
+
+      ENDLOOP.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+
+
+ENDFORM.                    " DO_LOOPT
+*&---------------------------------------------------------------------*
+*&      Form  POPULATE_OUTER_STANDARD
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WA_ROWS_CNT  text
+*      <--P_LTA_ITAB1  text
+*----------------------------------------------------------------------*
+FORM populate_outer_standard  USING    cnt TYPE i
+                              CHANGING cta_itab TYPE ty_ta_itab1.
+  DATA: lwa_itab LIKE LINE OF cta_itab.
+  CLEAR cta_itab.
+  DO cnt TIMES.
+    lwa_itab-key1 = sy-index.
+    APPEND lwa_itab TO cta_itab.
+  ENDDO.
+
+
+ENDFORM.                    " POPULATE_OUTER_STANDARD
+*&---------------------------------------------------------------------*
+*&      Form  POPULATE_INNER_STANDARD
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WA_ROWS_CNT  text
+*      <--P_LTA_ITAB2  text
+*----------------------------------------------------------------------*
+FORM populate_inner_standard  USING    cnt TYPE i
+                              CHANGING cta_itab TYPE ty_ta_itab1.
+  DATA: lwa_itab LIKE LINE OF cta_itab.
+  CLEAR cta_itab.
+  DO cnt TIMES.
+    lwa_itab-key1 = sy-index.
+    DO 10 TIMES.
+      lwa_itab-fld1 = 'ABCDEFGHIJ'.
+      APPEND lwa_itab TO cta_itab.
+    ENDDO.
+  ENDDO.
+ENDFORM.                    " POPULATE_INNER_STANDARD
+*&---------------------------------------------------------------------*
+*&      Form  DO_LOOPS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_loops .
+* Inner table is sorted table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ts_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'LOOP in LOOP: Outer standard, inner table SORTED'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_standard USING wa_rows-cnt CHANGING lta_itab1.
+
+    PERFORM populate_inner_sorted   USING wa_rows-cnt CHANGING lta_itab2.
+
+    tp_linesi = lines( lta_itab1 ).
+    tp_lineso = lines( lta_itab2 ).
+    WRITE: / 'Outer Table', tp_linesi, 'Inner Table', tp_lineso.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab1 INTO lwa_itab1.
+      LOOP AT lta_itab2 INTO lwa_itab2 WHERE key1 = lwa_itab1-key1. "SORTED table
+
+      ENDLOOP.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+ENDFORM.                    " DO_LOOPS
+*&---------------------------------------------------------------------*
+*&      Form  POPULATE_INNER_SORTED
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WA_ROWS_CNT  text
+*      <--P_LTA_ITAB2  text
+*----------------------------------------------------------------------*
+FORM populate_inner_sorted  USING    cnt TYPE i
+                              CHANGING cta_itab TYPE ty_ts_itab1.
+  DATA: lwa_itab LIKE LINE OF cta_itab.
+  CLEAR cta_itab.
+  DO cnt TIMES.
+    lwa_itab-key1 = sy-index.
+    DO 10 TIMES.
+      lwa_itab-fld1 = 'ABCDEFGHIJ'.
+      INSERT lwa_itab INTO TABLE cta_itab.
+    ENDDO.
+  ENDDO.
+ENDFORM.                    " POPULATE_INNER_SORTED
+FORM populate_outer_hashed  USING    cnt TYPE i
+                            CHANGING cta_itab TYPE ty_th_itab1.
+  DATA: lwa_itab LIKE LINE OF cta_itab.
+  CLEAR cta_itab.
+  DO cnt TIMES.
+    lwa_itab-key1 = sy-index.
+
+    INSERT lwa_itab INTO TABLE cta_itab.
+
+  ENDDO.
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  DO_READT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_readt .
+* Inner table is standard table, outer table is standard table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ta_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'READ in LOOP: Outer and Inner table are STANDARD'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_standard USING wa_rows-cnt CHANGING lta_itab1.
+    PERFORM populate_inner_standard USING wa_rows-cnt CHANGING lta_itab2.
+
+    tp_linesi = lines( lta_itab2 ).
+    tp_lineso = lines( lta_itab1 ).
+    WRITE: / 'Outer Table', tp_linesi, 'Inner Table', tp_lineso.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab2 INTO lwa_itab2.
+      READ TABLE lta_itab1 INTO lwa_itab1 WITH KEY key1 = lwa_itab2-key1.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+
+ENDFORM.                    " DO_READT
+*&---------------------------------------------------------------------*
+*&      Form  DO_READB
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_readb .
+* Inner table is standard table, outer table is standard table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ta_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'READ BINARY SEARCH in LOOP: Outer and Inner table are STANDARD'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_standard USING wa_rows-cnt CHANGING lta_itab1.
+    PERFORM populate_inner_standard USING wa_rows-cnt CHANGING lta_itab2.
+    tp_linesi = lines( lta_itab2 ).
+    tp_lineso = lines( lta_itab1 ).
+    WRITE: / 'Outer Table', tp_linesi, 'Inner Table', tp_lineso.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab2 INTO lwa_itab2.
+      READ TABLE lta_itab1 INTO lwa_itab1 WITH KEY key1 = lwa_itab2-key1 BINARY SEARCH.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+ENDFORM.                    " DO_READB
+*&---------------------------------------------------------------------*
+*&      Form  DO_READS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_reads .
+* Inner table is standard table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ts_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'READ SORTED TABLE in LOOP: Outer standard, inner table SORTED'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_sorted    USING wa_rows-cnt CHANGING lta_itab2.
+    PERFORM populate_inner_standard  USING wa_rows-cnt CHANGING lta_itab1.
+
+    tp_linesi = lines( lta_itab2 ).
+    tp_lineso = lines( lta_itab1 ).
+    WRITE: / 'Outer Table', tp_lineso, 'Inner Table', tp_linesi.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab1 INTO lwa_itab1.
+      READ TABLE lta_itab2 INTO lwa_itab2 WITH TABLE KEY key1 = lwa_itab1-key1.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+ENDFORM.                    " DO_READS
+*&---------------------------------------------------------------------*
+*&      Form  POPULATE_OUTER_SORTED
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_WA_ROWS_CNT  text
+*      <--P_LTA_ITAB1  text
+*----------------------------------------------------------------------*
+FORM populate_outer_sorted    USING    cnt TYPE i
+                              CHANGING cta_itab TYPE ty_ts_itab1.
+  DATA: lwa_itab LIKE LINE OF cta_itab.
+  CLEAR cta_itab.
+  DO cnt TIMES.
+    lwa_itab-key1 = sy-index.
+
+    INSERT lwa_itab INTO TABLE cta_itab.
+
+  ENDDO.
+ENDFORM.                    " POPULATE_OUTER_SORTED
+FORM do_readh .
+* Inner table is hashed table
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_th_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  WRITE: / 'READ HASHED TABLE in LOOP: Outer standard, inner table HASHED'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_hashed   USING wa_rows-cnt CHANGING lta_itab2.
+    PERFORM populate_inner_standard  USING wa_rows-cnt CHANGING lta_itab1.
+
+    tp_linesi = lines( lta_itab2 ).
+    tp_lineso = lines( lta_itab1 ).
+    WRITE: / 'Outer Table', tp_lineso, 'Inner Table', tp_linesi.
+    GET RUN TIME FIELD tp_start.
+
+    LOOP AT lta_itab1 INTO lwa_itab1.
+      READ TABLE lta_itab2 INTO lwa_itab2 WITH TABLE KEY key1 = lwa_itab1-key1.
+    ENDLOOP.
+
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+ENDFORM.                    " DO_READS
+*&---------------------------------------------------------------------*
+*&      Form  DO_LOOPP
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM do_loopp .
+  " Inner table is standard table, but processing is by using SKM logic
+  " Note: the inner and outer table must be sorted on same SKM values
+
+
+  DATA: lta_itab1 TYPE ty_ta_itab1, " STANDARD TABLE OF dd02l,
+        lta_itab2 TYPE ty_ta_itab1. " STANDARD TABLE OF dd03l.
+  DATA: lwa_itab1 LIKE LINE OF lta_itab1,
+        lwa_itab2 LIKE LINE OF lta_itab2.
+  DATA: tp_linesi TYPE i.
+  DATA: tp_lineso TYPE i.
+  DATA: tp_start TYPE i,
+        tp_end   TYPE i,
+        tp_diff  TYPE i,
+        tp_diff_prev TYPE i,
+        tp_perc  TYPE p DECIMALS 2.
+  TYPES: BEGIN OF lst_skm,
+              key1 TYPE ty_st_itab-key1,
+         END   OF lst_skm.
+
+  DATA: lst_skm_outer TYPE lst_skm.
+  DATA: lst_skm_inner TYPE lst_skm.
+  DATA: ltp_tabix_offset TYPE i.
+
+
+  WRITE: / 'LOOP in LOOP: Outer standard, inner table STANDARD, Parallel tabix processing'.
+  LOOP AT ta_rows INTO wa_rows.
+    PERFORM populate_outer_standard USING wa_rows-cnt CHANGING lta_itab1.
+    PERFORM populate_inner_standard USING wa_rows-cnt CHANGING lta_itab2.
+    SORT lta_itab1 BY key1.
+    SORT lta_itab2 BY key1.
+
+    tp_linesi = lines( lta_itab1 ).
+    tp_lineso = lines( lta_itab2 ).
+    WRITE: / 'Outer Table', tp_linesi, 'Inner Table', tp_lineso.
+    GET RUN TIME FIELD tp_start.
+
+    ltp_tabix_offset = 0.
+    LOOP AT lta_itab1 INTO lwa_itab1.
+      lst_skm_outer-key1 = lwa_itab1-key1.
+      LOOP AT lta_itab2 INTO lwa_itab2 FROM ltp_tabix_offset.
+        ltp_tabix_offset = sy-tabix.
+        lst_skm_inner-key1 = lwa_itab2-key1.
+        "check if the inner table is now on a
+        IF lst_skm_inner > lst_skm_outer.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    GET RUN TIME FIELD tp_end.
+    tp_diff = tp_end - tp_start.
+    WRITE: 'Runtime:', tp_diff.
+
+    IF tp_diff_prev > 0.
+      tp_perc =  tp_diff  / tp_diff_prev.
+      WRITE tp_perc.
+    ENDIF.
+    tp_diff_prev = tp_diff.
+
+  ENDLOOP.
+  ULINE.
+ENDFORM.                    " DO_LOOPP
